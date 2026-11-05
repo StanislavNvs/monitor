@@ -2,7 +2,7 @@ name: Monitor Tickets
 
 on:
   schedule:
-    - cron: '*/10 * * * *'   # каждые 10 минут (UTC)
+    - cron: '3,13,23,33,43,53 * * * *'    # каждые 10 минут (UTC)
   workflow_dispatch:
 
 jobs:
