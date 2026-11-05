@@ -1,67 +1,107 @@
 import os
+import re
 import requests
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import Playwright, sync_playwright
 
-# --- Настройки ---
-# URL страницы, где происходит поиск (замените на актуальный)
-SEARCH_URL = "https://minskslonim.by/" 
-# Элемент, появление которого означает, что места есть (нужно уточнить)
-# Например, это может быть кнопка "Забронировать" или текст "Свободно"
-TARGET_SELECTOR = "text=Забронировать" 
+# Дату можно переопределить через переменные окружения (см. ниже)
+DATE_MONTH_TEXT = os.getenv("DATE_MONTH_TEXT", "ноября, чт")
+DATE_CELL_NAME = os.getenv("DATE_CELL_NAME", "Fri Nov 06")
 
-def send_telegram_alert(message: str):
-    """Отправляет сообщение в Telegram."""
+
+def send_telegram_alert(message: str) -> None:
     token = os.getenv("TELEGRAM_TOKEN")
     chat_id = os.getenv("TELEGRAM_CHAT_ID")
     if not token or not chat_id:
-        print("Ошибка: не заданы TELEGRAM_TOKEN или TELEGRAM_CHAT_ID")
+        print("ОШИБКА: не заданы TELEGRAM_TOKEN или TELEGRAM_CHAT_ID")
         return
-        
-    url = f"https://api.telegram.org/bot{token}/sendMessage"
-    payload = {"chat_id": chat_id, "text": message}
     try:
-        response = requests.post(url, data=payload)
-        response.raise_for_status()
-        print("Уведомление отправлено в Telegram.")
+        r = requests.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            data={"chat_id": chat_id, "text": message},
+            timeout=30,
+        )
+        r.raise_for_status()
+        print("✅ Уведомление отправлено в Telegram")
     except Exception as e:
-        print(f"Ошибка отправки в Telegram: {e}")
+        print(f"❌ Ошибка Telegram: {e}")
 
-def main():
-    with sync_playwright() as p:
-        # Запускаем браузер в фоновом режиме (обязательно для GitHub Actions)
-        browser = p.chromium.launch(headless=True)
-        page = browser.new_page()
-        
+
+def check_available_seats(page) -> list[dict]:
+    """Возвращает список рейсов со свободными местами."""
+    available = []
+    blocks = page.locator(".booking-trip")
+
+    for i in range(blocks.count()):
+        block = blocks.nth(i)
         try:
-            print(f"Переход на {SEARCH_URL}")
-            page.goto(SEARCH_URL, timeout=60000)
-            
-            # --- ЗДЕСЬ ВАШИ ДЕЙСТВИЯ НА САЙТЕ ---
-            # Пример (замените на реальные селекторы):
-            # page.select_option('select[name="from"]', label="Минск")
-            # page.select_option('select[name="to"]', label="Слоним")
-            # page.fill('input[name="date"]', "2026-11-10")
-            # page.click('button:has-text("Найти билеты")')
-            # -------------------------------------
-            
-            # Ждём, пока результаты загрузятся (например, 5 секунд)
-            page.wait_for_timeout(5000)
-            
-            # Проверяем, появился ли целевой элемент (свободные места)
-            # Используем wait_for_selector с коротким таймаутом, чтобы не ждать долго
-            try:
-                page.wait_for_selector(TARGET_SELECTOR, timeout=10000, state="visible")
-                # Если элемент найден, отправляем уведомление
-                message = "🚐 Похоже, появились свободные места на маршрутку! Проверьте сайт."
-                send_telegram_alert(message)
-            except Exception:
-                # Элемент не найден — мест нет
-                print("Свободных мест не найдено.")
-                
-        except Exception as e:
-            print(f"Произошла ошибка: {e}")
-        finally:
-            browser.close()
+            seats_el = block.locator(".booking-trip-price-block-text-3").first
+            seats_text = seats_el.inner_text(timeout=2000).strip()
+        except Exception:
+            continue
 
-if __name__ == "__main__":
-    main()
+        # "нет мест" — пропускаем
+        if "нет мест" in seats_text.lower():
+            continue
+
+        # Извлекаем число мест
+        match = re.search(r"(\d+)\s*мест", seats_text.lower())
+        if not match:
+            continue
+        if int(match.group(1)) <= 0:
+            continue
+
+        # Время отправления
+        try:
+            time_text = block.locator(".booking-trip-time").first.inner_text(timeout=1000)
+        except Exception:
+            time_text = "?"
+
+        available.append({"time": time_text, "seats": seats_text})
+
+    return available
+
+
+def run(playwright: Playwright) -> None:
+    # headless=true для GitHub Actions, false для локальной отладки
+    headless = os.getenv("HEADLESS", "true").lower() != "false"
+    browser = playwright.chromium.launch(headless=headless)
+    context = browser.new_context()
+    page = context.new_page()
+
+    try:
+        print(f"→ Открываю сайт (headless={headless})")
+        page.goto("https://minskslonim.by/", timeout=60000)
+
+        # Выбор маршрута и даты
+        page.get_by_text("Куда", exact=True).click()
+        page.get_by_text("Слоним").click()
+        page.get_by_text(DATE_MONTH_TEXT).click()
+        page.get_by_role("gridcell", name=DATE_CELL_NAME).click()
+
+        # Ждём загрузки блоков с рейсами
+        page.wait_for_selector(".booking-trip", timeout=30000)
+        page.wait_for_timeout(2000)  # добираем возможные поздние подгрузки
+
+        available = check_available_seats(page)
+
+        if available:
+            lines = [f"🚐 {a['time']} — {a['seats']}" for a in available]
+            message = (
+                f"Свободные места Минск → Слоним ({DATE_CELL_NAME}):\n\n"
+                + "\n".join(lines)
+                + "\n\nhttps://minskslonim.by/"
+            )
+            print(message)
+            send_telegram_alert(message)
+        else:
+            print("Свободных мест нет")
+
+    except Exception as e:
+        print(f"❌ Ошибка выполнения: {e}")
+    finally:
+        context.close()
+        browser.close()
+
+
+with sync_playwright() as playwright:
+    run(playwright)
