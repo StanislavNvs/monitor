@@ -17,6 +17,12 @@ jobs:
         with:
           python-version: '3.13'
 
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-chromium-${{ runner.os }}-${{ hashFiles('monitor.py') }}
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
