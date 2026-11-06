@@ -1,15 +1,13 @@
 name: Monitor Tickets
 
 on:
-  schedule:
-    - cron: '3,13,23,33,43,53 * * * *'    # каждые 10 минут (UTC)
-  workflow_dispatch:
+  workflow_dispatch: # Оставляем только этот триггер. Теперь скрипт запускается внешним сигналом.
 
 jobs:
   check:
     runs-on: ubuntu-latest
     permissions:
-      contents: write   # понадобится позже для дедупликации
+      contents: write   # Понадобится для сохранения логов/дедупликации в репозиторий
     steps:
       - uses: actions/checkout@v4
 
@@ -17,11 +15,14 @@ jobs:
         with:
           python-version: '3.13'
 
+      # Кэш Playwright (лучше завязать на фиксированный ключ v1, чтобы он не сбрасывался при изменении кода в monitor.py)
       - name: Cache Playwright browsers
         uses: actions/cache@v4
         with:
           path: ~/.cache/ms-playwright
-          key: playwright-chromium-${{ runner.os }}-${{ hashFiles('monitor.py') }}
+          key: playwright-chromium-${{ runner.os }}-v1
+          restore-keys: |
+            playwright-chromium-${{ runner.os }}-
 
       - name: Install dependencies
         run: |
@@ -33,6 +34,6 @@ jobs:
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          DATE_MONTH_TEXT: "ноября, чт"
+          DATE_MONTH_TEXT: "ноября, пт"   # Исправлено на "пт", так как Nov 06 — это пятница
           DATE_CELL_NAME: "Fri Nov 06"
         run: python monitor.py
